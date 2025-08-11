@@ -540,9 +540,6 @@ class SelfAttention(torch.nn.Module):
         #     print('endconvert_rotary_pos_emb',endconvert_rotary_pos_emb.shape)
 
 
-
-
-
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             query_layer = apply_rotary_pos_emb(query_layer, rotary_pos_emb)
@@ -992,8 +989,8 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
             delete_start: Optional[int] = None,
             delete_end: Optional[int] = None,
     ):
-        if input_ids.shape[1]!=1:
-            print('position_ids',position_ids)
+        # if input_ids.shape[1]!=1:
+        #     print('position_ids',position_ids)
             # print('222convert_position',convert_position)
 
         #     print('iiiinput_ids',input_ids.shape)
@@ -1062,8 +1059,8 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         else:
             # print('inputs_embeds',inputs_embeds.shape)
             # print('222position_ids',position_ids)
-            # print('222convert_position',convert_position)
-            # print('222endconvert_position',endconvert_position)
+            print('222convert_position',convert_position)
+            print('222endconvert_position',endconvert_position)
 
             convert_rotary_pos_emb = convert_rotary_pos_emb[convert_position]
             endconvert_rotary_pos_emb = endconvert_rotary_pos_emb[endconvert_position]
@@ -1092,7 +1089,7 @@ class ChatGLMModel(ChatGLMPreTrainedModel):
         if not return_dict:
             return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None)
 
-        print('8888888',presents[0][0].shape)
+        # print('8888888',presents[0][0].shape)
 
 
         return BaseModelOutputWithPast(
@@ -1203,7 +1200,7 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
 
-        print('dddddddddelete_start',delete_start)
+        # print('dddddddddelete_start',delete_start)
 
 
         transformer_outputs = self.transformer(
@@ -1361,3 +1358,34 @@ class ChatGLMForSequenceClassification(ChatGLMPreTrainedModel):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
         )
+
+'''
+1. 
+longbench
+
+data:
+
+大段speech  turn
+多轮对话
+客服
+
+model:
+glm voice
+qwen omni
+slam omni
+llama omni
+
+gpt-audio
+gemini
+
+metric:
+准确率
+首token
+显存
+
+消融:
+纯音频，纯文本，有无kvcache，有无编辑
+
+
+'''
+
