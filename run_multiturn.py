@@ -13,7 +13,7 @@ import torch
 import os
 import time
 import torch
-
+import pdb
 from funasr import AutoModel as ASRMODEL
 from transformers import WhisperFeatureExtractor, AutoTokenizer, AutoModel, BitsAndBytesConfig
 from speech_tokenizer.modeling_whisper import WhisperVQEncoder
@@ -33,14 +33,21 @@ def load_dialogues_from_json(json_path):
         data = json.load(f)
     return data
 
-turnnum = 8
-modality = 'audio'
 
 asr_model_dir = "/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/huggingface.co/FunAudioLLM/SenseVoiceSmall"
 asrmodel = ASRMODEL(
     model=asr_model_dir,
 )
-
+def dialog_id_exists(output_json, new_dialog_id):
+    with open(output_json, 'r', encoding='utf-8') as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if data.get("dialog_id") == new_dialog_id:
+                    return True
+            except json.JSONDecodeError:
+                continue
+    return False
 
 def encode_text(text, tokenizer):
     return tokenizer([text], return_tensors="pt")['input_ids'][0].tolist()
@@ -175,7 +182,7 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
     start_time = time.time()
 
 
-    if convert_token is not None and mode == 0:
+    if convert_token is not None and (mode == 0 or mode == 4 or mode ==5):
         # print('convert_token',convert_token)
         
         convert_ids = glm_tokenizer([convert_token], return_tensors="pt").to(device)['input_ids'][:,2:]
@@ -219,7 +226,6 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
         input_ids = all_input_ids
         input_position_ids = all_input_position_ids
 
-    streamer1 = TokenStreamer(skip_prompt=True)
     streamer = TokenStreamer(skip_prompt=True)
 
     # if past_key_values is not None:
@@ -236,7 +242,7 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
     # print('111delete_end',end)
 
 
-    if start is not None and mode == 0:
+    if start is not None and (mode == 0 or mode == 4 or mode ==5):
         # print('333convert_ids', glm_tokenizer.decode(convert_ids.squeeze(0).tolist(), spaces_between_special_tokens=False))
         # print('3333end_convert_ids', glm_tokenizer.decode(end_convert_ids.squeeze(0).tolist(), spaces_between_special_tokens=False))
         # print('333input_ids',glm_tokenizer.decode(input_ids.squeeze(0).tolist(), spaces_between_special_tokens=False))
@@ -250,13 +256,14 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
             temperature=float(temperature),
             top_p=float(top_p),
             return_dict_in_generate=True,
-            streamer=streamer1,
             convert_position=all_input_position_ids[:,end:end+length],
             endconvert_position=all_input_position_ids[:,start+convert_ids.shape[1]:start+convert_ids.shape[1]+length],
             delete_start=start,
             delete_end=end,
             past_key_values=past_key_values,
+            mode = mode,
         )
+
         output = glm_model.generate(**gen_kwargs)
         new_layer = []
         for layer_idx, i in enumerate(output.past_key_values):
@@ -275,15 +282,36 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
         # print("模型生成的token ids:", output["sequences"] if "sequences" in output else output[0])
         # print("模型生成的文本:", glm_tokenizer.decode((output["sequences"][0] if "sequences" in output else output[0][0]).tolist(), spaces_between_special_tokens=False))
 
-    print('4444444')
-
+     
     end_time = time.time()
     edit_time = end_time - start_time
+
+    input_ids_length = input_ids.shape[-1] if hasattr(input_ids, "shape") else len(input_ids)
+    if past_key_values is not None:
+        kvcache_length = past_key_values[0][0].shape[2]
+    else:
+        kvcache_length = None
 
     
     print('input_ids',input_ids.shape)
     print('attention_mask',input_attention_mask.shape)
     print('position_ids',input_position_ids.shape)
+
+    if mode == 5 and convert_token is not None:
+        # 此时把kvcache置空
+        all_inputs = all_inputs.replace(previous_convert_token, convert_token)
+
+        all_inputs_emb = glm_tokenizer([all_inputs], return_tensors="pt").to(device)
+
+        
+
+
+        input_ids = all_inputs_emb['input_ids']
+        input_position_ids = all_inputs_emb['position_ids']
+        input_attention_mask = all_inputs_emb['attention_mask']
+        print('bbbbbbbinput_ids',len(input_ids))
+        print('input_attention_mask',len(input_attention_mask))
+        
 
 
     gen_kwargs = dict(  
@@ -297,42 +325,35 @@ def glm_generate_stream(all_inputs,convert_token,previous_convert_token, tempera
         streamer=streamer,
         past_key_values=past_key_values,
     )
-    
+    # print()
+
 
     output_container = {}
 
     start_time = time.time()
+    # pdb.set_trace()
+    
+    output = glm_model.generate(**gen_kwargs)
 
 
-    def run_generate():
-        output = glm_model.generate(**gen_kwargs)
-        print(output.keys())
-        # print(output.past_key_values)
-        if hasattr(output, "past_key_values"):
-            print('kkkkk',output.past_key_values[0][0].shape)
-            output_container["past_key_values"] = output.past_key_values
-        elif isinstance(output, tuple) and len(output) > 1:
-            output_container["past_key_values"] = output[1]
-
-    thread = Thread(target=run_generate)
-    thread.start()
-    thread.join()
-
-    if output_container.get("past_key_values", None) is not None:
-        print('vvvvv',output_container.get("past_key_values", None)[0][0].shape)
+    if hasattr(output, "past_key_values"):
+        print('kkkkk', output.past_key_values[0][0].shape)
+        output_container["past_key_values"] = output.past_key_values
+    elif isinstance(output, tuple) and len(output) > 1:
+        output_container["past_key_values"] = output[1]
 
     for idx, token_id in enumerate(streamer):
         if idx == 0:
             first_token_time = time.time()
             first_token_time = first_token_time - start_time
+            # pdb.set_trace()
         yield ("token", token_id)
     yield ("past_key_values", output_container.get("past_key_values", None))
     yield ("tokenizer_time", tokenizer_time)
     yield ("edit_time", edit_time)
     yield ("first_token_time", first_token_time)
-
-    
-
+    yield ("input_ids_length", input_ids_length)
+    yield ("kvcache_length", kvcache_length)
 
 
 
@@ -348,7 +369,8 @@ def inference_fn(
         previous_completion_tokens: str,
         previous_kv_cache=None,
         save_history=1,
-        mode=0
+        mode=0,
+        repace_text=None
     ):
     def extract_user_round(text, i):
         # 找到所有 <|user|> 的位置
@@ -378,7 +400,7 @@ def inference_fn(
     previous_convert_token = None
     convert_token = None
 
-    if current_turn > save_history and mode==0:
+    if current_turn > save_history and (mode==0 or mode==4 or mode==5):
         convert_turn = current_turn - save_history - 1
         convert_history = extract_history_round(history,convert_turn)
 
@@ -394,13 +416,19 @@ def inference_fn(
             )
         convert_token = '<|user|>\n' + res[0]["text"].split('>')[-1] + '<|assistant|>streaming_transcription\n' + convert_history[2]['content']
 
+
+        # res = convert_history[0]['text']
+        # print('res',res)
+        # convert_token = '<|user|>\n' + res + '<|assistant|>streaming_transcription\n' + convert_history[2]['content']
+
+
         previous_convert_token = extract_user_round(previous_input_tokens,convert_turn)
 
         # convert_token = previous_convert_token
 
     if input_mode == "audio":
         assert audio_path is not None
-        history.append({"role": "user", "content": {"path": audio_path}})
+        history.append({"role": "user", "content": {"path": audio_path},"text":repace_text})
         audio_tokens = extract_speech_token(
             whisper_model, feature_extractor, [audio_path]
         )[0]
@@ -456,8 +484,6 @@ def inference_fn(
         previous_convert_token=previous_convert_token,
         mode=mode
     )
-    
-
 
     # 定义变量
     new_kv_cache = None
@@ -465,11 +491,14 @@ def inference_fn(
     edit_time = None
     first_token_time = None
     memory = None
+    input_ids_length = None
+    kvcache_length = None
+
 
     complete_tokens, audio_tokens, text_tokens = [], [], []
     is_finalize = False
 
-    if convert_token is not None and mode == 0:
+    if convert_token is not None and (mode == 0 or mode ==4 or mode ==5):
         all_inputs = all_inputs.replace(previous_convert_token, convert_token)
 
 
@@ -513,6 +542,10 @@ def inference_fn(
             edit_time = value
         elif key == "first_token_time":
             first_token_time = value
+        elif key == "input_ids_length":
+            input_ids_length = value
+        elif key == "kvcache_length":
+            kvcache_length = value
 
     # 后续处理（音频合成、文本解码等）
     tts_speech = torch.cat(tts_speechs, dim=-1).cpu() if tts_speechs else None
@@ -529,11 +562,8 @@ def inference_fn(
 
     model_output = glm_tokenizer.decode(text_tokens, ignore_special_tokens=False)
 
-    if mode == 2:
-        new_kv_cache = None
-
     # 返回时多加三个时间
-    return history, all_inputs, complete_text, audio_file, new_kv_cache, first_token_time, memory, tokenizer_time, edit_time,model_output
+    return history, all_inputs, complete_text, audio_file, new_kv_cache, first_token_time, memory, tokenizer_time, edit_time,model_output,input_ids_length,kvcache_length
 
 
 if __name__ == "__main__":
@@ -546,6 +576,8 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--mode", type=int, default=0)
     parser.add_argument("--max_duration", type=float, default=60.0, help="累计音频时长阈值")
+    parser.add_argument("--k", type=int, default=1, help="累计音频时长阈值")
+
 
 
     args = parser.parse_args()
@@ -576,6 +608,19 @@ if __name__ == "__main__":
     # for txt_file in txt_files[::-1]:
     for txt_file in txt_files:
         dialog_id = os.path.splitext(os.path.basename(txt_file))[0]  # e.g. MUL0001
+
+        # output_json = "/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/tmp.json"
+        output_json = f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/turnnum/multiturn_asr_mode{args.mode}_dur{args.max_duration}_k{args.k}.json"
+        # output_json = f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/tmp/multiturn_mode{args.mode}_dur{args.max_duration}.json"
+       
+        # 如果文件不存在，创建一个空的JSON文件
+        if not os.path.exists(output_json):
+            with open(output_json, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
+
+        if dialog_id_exists(output_json, dialog_id):
+            continue
+
         # 读取txt内容
         turns = []
         with open(txt_file, "r", encoding="utf-8") as f:
@@ -622,11 +667,18 @@ if __name__ == "__main__":
                     continue
                 wav_path = turns[i]["wav"]
                 text = turns[i]["text"]
+                print('text',text)
                 if not os.path.exists(wav_path):
                     print(f"Audio file does not exist: {wav_path}")
                     continue
 
-                history, input_tokens, completion_tokens, audio_file, kv_cache, first_token_time, memory, tokenizer_time, edit_time ,_= inference_fn(
+                if args.mode==5:
+                    tmp_mode = 0
+                else:
+                    tmp_mode = args.mode
+
+
+                history, input_tokens, completion_tokens, audio_file, kv_cache, first_token_time, memory, tokenizer_time, edit_time ,_,_,_= inference_fn(
                     temperature=0.2,
                     top_p=0.8,
                     max_new_token=1,
@@ -637,7 +689,9 @@ if __name__ == "__main__":
                     previous_input_tokens=input_tokens,
                     previous_completion_tokens=completion_tokens,
                     previous_kv_cache=kv_cache,
-                    mode=args.mode
+                    save_history = args.k,
+                    mode=tmp_mode,
+                    repace_text = text,
                 )
                 turn = turns[i + 1]
                 wav_path = turn["wav"]
@@ -669,11 +723,9 @@ if __name__ == "__main__":
                     continue
                 wav_path = turns[i]["wav"]
                 text = turns[i]["text"]
-                if not os.path.exists(wav_path):
-                    print(f"Audio file does not exist: {wav_path}")
-                    continue
 
-                history, input_tokens, completion_tokens, audio_file, kv_cache, first_token_time, memory, tokenizer_time, edit_time ,_= inference_fn(
+
+                history, input_tokens, completion_tokens, audio_file, kv_cache, first_token_time, memory, tokenizer_time, edit_time ,_,_,_= inference_fn(
                     temperature=0.2,
                     top_p=0.8,
                     max_new_token=1,
@@ -684,14 +736,15 @@ if __name__ == "__main__":
                     previous_input_tokens=input_tokens,
                     previous_completion_tokens=completion_tokens,
                     previous_kv_cache=kv_cache,
-                    mode=args.mode
+                    mode=args.mode,
+                    repace_text = text
+
                 )
                 turn = turns[i + 1]
                 wav_path = turn["wav"]
                 text = turn["text"]
                 turnoutput = ""
                 text_token_ids = encode_text(text, glm_tokenizer)
-                audio_token_ids = encode_audio(wav_path, whisper_model, feature_extractor)
                 interleaved = text_token_ids
 
                 history.append({"role": "assistant", "content": {"path": wav_path, "type": "audio/wav"}})
@@ -704,48 +757,14 @@ if __name__ == "__main__":
                         turnoutput += t
                 completion_tokens = turnoutput
 
-            # i = end_idx - 1
-            # wav_path = turns[i]["wav"]
-            # text = turns[i]["text"]
-            # if not os.path.exists(wav_path):
-            #     print(f"Audio file does not exist: {wav_path}")
-            #     continue
-            # history, input_tokens, completion_tokens, audio_file, kv_cache, first_token_time, memory, tokenizer_time, edit_time ,_= inference_fn(
-            #     temperature=0.2,
-            #     top_p=0.8,
-            #     max_new_token=1,
-            #     input_mode='audio',
-            #     audio_path=wav_path,
-            #     input_text=None,
-            #     history=history,
-            #     previous_input_tokens=input_tokens,
-            #     previous_completion_tokens=completion_tokens,
-            #     previous_kv_cache=kv_cache,
-            #     mode=args.mode
-            # )
-            # turn = turns[i + 1]
-            # wav_path = turn["wav"]
-            # text = turn["text"]
-            # turnoutput = ""
-            # text_token_ids = encode_text(text, glm_tokenizer)
-            # audio_token_ids = encode_audio(wav_path, whisper_model, feature_extractor)
-            # interleaved = interleave_text_audio_tokens(text_token_ids, audio_token_ids, 13, 26)
+            # 此时收集到了input_tokens和kv_cache
+            collected_input_tokens = input_tokens
+            collected_completion_tokens = completion_tokens
+            collected_kv_cache = kv_cache
+            collected_history = history
 
-            # history.append({"role": "assistant", "content": {"path": wav_path, "type": "audio/wav"}})
-            # history.append({"role": "assistant", "content": text})
-
-            # for t in interleaved:
-            #     if isinstance(t, int):
-            #         turnoutput += glm_tokenizer.decode([t], spaces_between_special_tokens=False)
-            #     else:
-            #         turnoutput += t
-            # completion_tokens = turnoutput
-
-        # 此时收集到了input_tokens和kv_cache
-        collected_input_tokens = input_tokens
-        collected_completion_tokens = completion_tokens
-        collected_kv_cache = kv_cache
-        collected_history = history
+        if args.mode==2 or args.mode==3 or args.mode==5:
+            collected_kv_cache = None
 
         print(history)
 
@@ -759,9 +778,9 @@ if __name__ == "__main__":
                 turn = int(turn)-1
                 
                 wav_path = f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/data/LongDialogue/LongDialogue/questions/{dialog_id}_{turn}.wav"
-
+                print('tttttttttttt',collected_input_tokens)
                 # 推理
-                history, _, complete_text, _, _, first_token_time, first_token_memory, tokenizer_time, edit_time, model_output = inference_fn(
+                history, _, complete_text, _, _, first_token_time, first_token_memory, tokenizer_time, edit_time, model_output,input_length,kvcache_length = inference_fn(
                     temperature=0.2,
                     top_p=0.8,
                     max_new_token=200,
@@ -771,23 +790,24 @@ if __name__ == "__main__":
                     history=collected_history.copy(),
                     previous_input_tokens=collected_input_tokens,
                     previous_completion_tokens=collected_completion_tokens,
+                    save_history = args.k,
                     previous_kv_cache=collected_kv_cache,
                     mode=args.mode
                 )
                 
-                results.append({
-                    "dialog_id": dialog_id,
-                    "question": question_text,
-                    "answer": qa["Answer"],
-                    "model_output": model_output,
-                    "first_token_time": first_token_time,
-                    "first_token_memory": first_token_memory,
-                    "tokenizer_time": tokenizer_time,
-                    "edit_time": edit_time,
-                    "HistoryDuration": qa["HistoryDuration"]
-                })
+                # results.append({
+                #     "dialog_id": dialog_id,
+                #     "question": question_text,
+                #     "answer": qa["Answer"],
+                #     "model_output": model_output,
+                #     "first_token_time": first_token_time,
+                #     "first_token_memory": first_token_memory,
+                #     "tokenizer_time": tokenizer_time,
+                #     "edit_time": edit_time,
+                #     "HistoryDuration": qa["HistoryDuration"]
+                # })
 
-                with open(f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/tmp/multiturn_tmp_mode{args.mode}_dur{max_duration}_2.json", "a", encoding="utf-8") as f:
+                with open(output_json, "a", encoding="utf-8") as f:
                     f.write(json.dumps({
                     "dialog_id": dialog_id,
                     "question": question_text,
@@ -797,11 +817,13 @@ if __name__ == "__main__":
                     "first_token_memory": first_token_memory,
                     "tokenizer_time": tokenizer_time,
                     "edit_time": edit_time,
-                    "HistoryDuration": qa["HistoryDuration"]
+                    "HistoryDuration": qa["HistoryDuration"],
+                    "input_length":input_length,
+                    "kvcache_length":kvcache_length
                 }, ensure_ascii=False) + "\n")
             
-    with open(f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/multiturn_mode{args.mode}_dur{max_duration}_2.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+    # with open(f"/mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/multiturn_mode{args.mode}_dur{max_duration}_2.json", "w", encoding="utf-8") as f:
+        # json.dump(results, f, ensure_ascii=False, indent=2)
 
 
 
@@ -812,19 +834,75 @@ conda activate /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/tools/env_bk/g
 cd /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice
 
 
+
+
+export CUDA_VISIBLE_DEVICES=0
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 960\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/00.log 2>&1 &
+
+
+
+export CUDA_VISIBLE_DEVICES=1
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 240\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/5.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=2
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 480\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/4.log 2>&1 &
+
 export CUDA_VISIBLE_DEVICES=3
-nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 3 --max_duration 960\
-    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/mode3_dur120_2.log 2>&1 &
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 960\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
 
 
 export CUDA_VISIBLE_DEVICES=4
-nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 1 --max_duration 120\
-    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/mode1_dur120_1.log 2>&1 &
-
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 120\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
 
 export CUDA_VISIBLE_DEVICES=5
-nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 2 --max_duration 120\
-    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/mode2_dur120_1.log 2>&1 &
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 240\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=6
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 480\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=7
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 960\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+
+export CUDA_VISIBLE_DEVICES=1
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 0 --max_duration 960 --k 1\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/tmp.log 2>&1 &
+
+
+
+export CUDA_VISIBLE_DEVICES=1
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 960 --k 3\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/55.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=2
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 960 --k 5\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/4.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=3
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 5 --max_duration 960 --k 7\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+
+
+export CUDA_VISIBLE_DEVICES=4
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 960 --k 3\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=5
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 960 --k 5\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
+
+export CUDA_VISIBLE_DEVICES=6
+nohup python /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/run_multiturn.py --mode 4 --max_duration 960 --k 7\
+    > /mnt/dolphinfs/hdd_pool/docker/user/hadoop-fsprisk/fudongjie/GLM-4-Voice/result/multiturn/log/0.log 2>&1 &
 
 
 
@@ -836,6 +914,8 @@ mode = 1：有kv
 mode = 2：原始的glm
 mode = 3：前n轮是文本
 mode = 4：直接替换
+mode = 5：重新计算
+
 
 
 '''
